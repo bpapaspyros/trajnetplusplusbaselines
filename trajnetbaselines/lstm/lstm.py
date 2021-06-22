@@ -12,6 +12,7 @@ from .utils import center_scene
 
 NAN = float('nan')
 
+
 def drop_distant(xy, r=6.0):
     """
     Drops pedestrians more than r meters away from primary ped
@@ -44,24 +45,26 @@ class LSTM(torch.nn.Module):
         self.pool = pool
         self.pool_to_input = pool_to_input
 
-        ## Location
+        # Location
         scale = 4.0
         self.input_embedding = InputEmbedding(2, self.embedding_dim, scale)
 
-        ## Goal
+        # Goal
         self.goal_flag = goal_flag
         self.goal_dim = goal_dim or embedding_dim
         self.goal_embedding = InputEmbedding(2, self.goal_dim, scale)
         goal_rep_dim = self.goal_dim if self.goal_flag else 0
 
-        ## Pooling
+        # Pooling
         pooling_dim = 0
         if pool is not None and self.pool_to_input:
-            pooling_dim = self.pool.out_dim 
-        
-        ## LSTMs
-        self.encoder = torch.nn.LSTMCell(self.embedding_dim + goal_rep_dim + pooling_dim, self.hidden_dim)
-        self.decoder = torch.nn.LSTMCell(self.embedding_dim + goal_rep_dim + pooling_dim, self.hidden_dim)
+            pooling_dim = self.pool.out_dim
+
+        # LSTMs
+        self.encoder = torch.nn.LSTMCell(
+            self.embedding_dim + goal_rep_dim + pooling_dim, self.hidden_dim)
+        self.decoder = torch.nn.LSTMCell(
+            self.embedding_dim + goal_rep_dim + pooling_dim, self.hidden_dim)
 
         # Predict the parameters of a multivariate normal:
         # mu_vel_x, mu_vel_y, sigma_vel_x, sigma_vel_y, rho
@@ -69,7 +72,7 @@ class LSTM(torch.nn.Module):
 
     def step(self, lstm, hidden_cell_state, obs1, obs2, goals, batch_split):
         """Do one step of prediction: two inputs to one normal prediction.
-        
+
         Parameters
         ----------
         lstm: torch nn module [Encoder / Decoder]
@@ -82,7 +85,7 @@ class LSTM(torch.nn.Module):
             Current x-y positions of the pedestrians
         goals : Tensor [num_tracks, 2]
             Goal coordinates of the pedestrians
-        
+
         Returns
         -------
         hidden_cell_state : tuple (hidden_state, cell_state)
@@ -96,49 +99,55 @@ class LSTM(torch.nn.Module):
         # consider only the hidden states of pedestrains present in scene
         track_mask = (torch.isnan(obs1[:, 0]) + torch.isnan(obs2[:, 0])) == 0
 
-        ## Masked Hidden Cell State
+        # Masked Hidden Cell State
         hidden_cell_stacked = [
-            torch.stack([h for m, h in zip(track_mask, hidden_cell_state[0]) if m], dim=0),
-            torch.stack([c for m, c in zip(track_mask, hidden_cell_state[1]) if m], dim=0),
+            torch.stack(
+                [h for m, h in zip(track_mask, hidden_cell_state[0]) if m], dim=0),
+            torch.stack(
+                [c for m, c in zip(track_mask, hidden_cell_state[1]) if m], dim=0),
         ]
 
-        ## Mask current velocity & embed
+        # Mask current velocity & embed
         curr_velocity = obs2 - obs1
         curr_velocity = curr_velocity[track_mask]
         input_emb = self.input_embedding(curr_velocity)
 
-        ## Mask Goal direction & embed
+        # Mask Goal direction & embed
         if self.goal_flag:
-            ## Get relative direction to goals (wrt current position)
+            # Get relative direction to goals (wrt current position)
             norm_factors = (torch.norm(obs2 - goals, dim=1))
             goal_direction = (obs2 - goals) / norm_factors.unsqueeze(1)
-            goal_direction[norm_factors == 0] = torch.tensor([0., 0.], device=obs1.device)
+            goal_direction[norm_factors == 0] = torch.tensor(
+                [0., 0.], device=obs1.device)
             goal_direction = goal_direction[track_mask]
             goal_emb = self.goal_embedding(goal_direction)
             input_emb = torch.cat([input_emb, goal_emb], dim=1)
 
-        ## Mask & Pool per scene
+        # Mask & Pool per scene
         if self.pool is not None:
-            hidden_states_to_pool = torch.stack(hidden_cell_state[0]).clone() # detach?
+            hidden_states_to_pool = torch.stack(
+                hidden_cell_state[0]).clone()  # detach?
             batch_pool = []
-            ## Iterate over scenes
+            # Iterate over scenes
             for (start, end) in zip(batch_split[:-1], batch_split[1:]):
-                ## Mask for the scene
+                # Mask for the scene
                 scene_track_mask = track_mask[start:end]
-                ## Get observations and hidden-state for the scene
+                # Get observations and hidden-state for the scene
                 prev_position = obs1[start:end][scene_track_mask]
                 curr_position = obs2[start:end][scene_track_mask]
                 curr_hidden_state = hidden_states_to_pool[start:end][scene_track_mask]
 
                 # LSTM-Based Interaction Encoders. Provide track_mask to the interaction encoder LSTMs
                 if self.pool.__class__.__name__ in {'NN_LSTM', 'TrajectronPooling', 'SAttention_fast'}:
-                    ## Everyone absent by default
-                    interaction_track_mask = torch.zeros(num_tracks, device=obs1.device).bool()
-                    ## Only those visible in current scene are present
+                    # Everyone absent by default
+                    interaction_track_mask = torch.zeros(
+                        num_tracks, device=obs1.device).bool()
+                    # Only those visible in current scene are present
                     interaction_track_mask[start:end] = track_mask[start:end]
                     self.pool.track_mask = interaction_track_mask
 
-                pool_sample = self.pool(curr_hidden_state, prev_position, curr_position)
+                pool_sample = self.pool(
+                    curr_hidden_state, prev_position, curr_position)
                 batch_pool.append(pool_sample)
 
             pooled = torch.cat(batch_pool)
@@ -166,7 +175,7 @@ class LSTM(torch.nn.Module):
 
     def forward(self, observed, goals, batch_split, prediction_truth=None, n_predict=None):
         """Forecast the entire sequence 
-        
+
         Parameters
         ----------
         observed : Tensor [obs_length, num_tracks, 2]
@@ -202,11 +211,13 @@ class LSTM(torch.nn.Module):
         # a single higher rank Tensor.
         num_tracks = observed.size(1)
         hidden_cell_state = (
-            [torch.zeros(self.hidden_dim, device=observed.device) for _ in range(num_tracks)],
-            [torch.zeros(self.hidden_dim, device=observed.device) for _ in range(num_tracks)],
+            [torch.zeros(self.hidden_dim, device=observed.device)
+             for _ in range(num_tracks)],
+            [torch.zeros(self.hidden_dim, device=observed.device)
+             for _ in range(num_tracks)],
         )
 
-        ## LSTM-Based Interaction Encoders. Initialze Hdden state ## TODO
+        # LSTM-Based Interaction Encoders. Initialze Hdden state ## TODO
         if self.pool.__class__.__name__ in {'NN_LSTM', 'TrajectronPooling', 'SAttention', 'SAttention_fast'}:
             self.pool.reset(num_tracks, device=observed.device)
 
@@ -219,12 +230,16 @@ class LSTM(torch.nn.Module):
 
         # encoder
         for obs1, obs2 in zip(observed[:-1], observed[1:]):
-            ##LSTM Step
-            hidden_cell_state, normal = self.step(self.encoder, hidden_cell_state, obs1, obs2, goals, batch_split)
+            # LSTM Step
+            hidden_cell_state, normal = self.step(
+                self.encoder, hidden_cell_state, obs1, obs2, goals, batch_split)
+
+            sampled_normal = torch.normal(normal[:, :2], normal[:, 2:-1])
 
             # concat predictions
             normals.append(normal)
-            positions.append(obs2 + normal[:, :2])  # no sampling, just mean
+            # positions.append(obs2 + normal[:, :2])  # no sampling, just mean
+            positions.append(obs2 + sampled_normal)  # no sampling, just mean
 
         # initialize predictions with last position to form velocity
         prediction_truth = list(itertools.chain.from_iterable(
@@ -237,17 +252,23 @@ class LSTM(torch.nn.Module):
                 obs1 = positions[-2].detach()  # DETACH!!!
             else:
                 for primary_id in batch_split[:-1]:
-                    obs1[primary_id] = positions[-2][primary_id].detach()  # DETACH!!!
+                    # DETACH!!!
+                    obs1[primary_id] = positions[-2][primary_id].detach()
             if obs2 is None:
                 obs2 = positions[-1].detach()
             else:
                 for primary_id in batch_split[:-1]:
-                    obs2[primary_id] = positions[-1][primary_id].detach()  # DETACH!!!
-            hidden_cell_state, normal = self.step(self.decoder, hidden_cell_state, obs1, obs2, goals, batch_split)
+                    # DETACH!!!
+                    obs2[primary_id] = positions[-1][primary_id].detach()
+            hidden_cell_state, normal = self.step(
+                self.decoder, hidden_cell_state, obs1, obs2, goals, batch_split)
+
+            sampled_normal = torch.normal(normal[:, :2], normal[:, 2:-1])
 
             # concat predictions
             normals.append(normal)
-            positions.append(obs2 + normal[:, :2])  # no sampling, just mean
+            # positions.append(obs2 + normal[:, :2])  # no sampling, just mean
+            positions.append(obs2 + sampled_normal)  # no sampling, just mean
 
         # Pred_scene: Tensor [seq_length, num_tracks, 2]
         #    Absolute positions of all pedestrians
@@ -257,6 +278,7 @@ class LSTM(torch.nn.Module):
         pred_scene = torch.stack(positions, dim=0)
 
         return rel_pred_scene, pred_scene
+
 
 class LSTMPredictor(object):
     def __init__(self, model):
@@ -276,7 +298,6 @@ class LSTMPredictor(object):
         with open(filename, 'rb') as f:
             return torch.load(f)
 
-
     def __call__(self, paths, scene_goal, n_predict=12, modes=1, predict_all=True, obs_length=9, start_length=0, args=None):
         self.model.eval()
         # self.model.train()
@@ -284,28 +305,31 @@ class LSTMPredictor(object):
             xy = trajnetplusplustools.Reader.paths_to_xy(paths)
             batch_split = [0, xy.shape[1]]
 
-            ## Drop Distant (for real data)
+            # Drop Distant (for real data)
             # xy, mask = drop_distant(xy, r=15.0)
             # scene_goal = scene_goal[mask]
 
             if args.normalize_scene:
-                xy, rotation, center, scene_goal = center_scene(xy, obs_length, goals=scene_goal)
-            
-            xy = torch.Tensor(xy)  #.to(self.device)
-            scene_goal = torch.Tensor(scene_goal) #.to(device)
+                xy, rotation, center, scene_goal = center_scene(
+                    xy, obs_length, goals=scene_goal)
+
+            xy = torch.Tensor(xy)  # .to(self.device)
+            scene_goal = torch.Tensor(scene_goal)  # .to(device)
             batch_split = torch.Tensor(batch_split).long()
 
             multimodal_outputs = {}
             for num_p in range(modes):
                 # _, output_scenes = self.model(xy[start_length:obs_length], scene_goal, batch_split, xy[obs_length:-1].clone())
-                _, output_scenes = self.model(xy[start_length:obs_length], scene_goal, batch_split, n_predict=n_predict)
+                _, output_scenes = self.model(
+                    xy[start_length:obs_length], scene_goal, batch_split, n_predict=n_predict)
                 output_scenes = output_scenes.numpy()
                 if args.normalize_scene:
-                    output_scenes = augmentation.inverse_scene(output_scenes, rotation, center)
+                    output_scenes = augmentation.inverse_scene(
+                        output_scenes, rotation, center)
                 output_primary = output_scenes[-n_predict:, 0]
                 output_neighs = output_scenes[-n_predict:, 1:]
-                ## Dictionary of predictions. Each key corresponds to one mode
+                # Dictionary of predictions. Each key corresponds to one mode
                 multimodal_outputs[num_p] = [output_primary, output_neighs]
 
-        ## Return Dictionary of predictions. Each key corresponds to one mode
+        # Return Dictionary of predictions. Each key corresponds to one mode
         return multimodal_outputs
