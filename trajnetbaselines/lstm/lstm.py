@@ -1,4 +1,5 @@
 import itertools
+import copy
 
 import numpy as np
 import torch
@@ -137,17 +138,14 @@ class LSTM(torch.nn.Module):
                 curr_position = obs2[start:end][scene_track_mask]
                 curr_hidden_state = hidden_states_to_pool[start:end][scene_track_mask]
 
-                # LSTM-Based Interaction Encoders. Provide track_mask to the interaction encoder LSTMs
-                if self.pool.__class__.__name__ in {'NN_LSTM', 'TrajectronPooling', 'SAttention_fast'}:
-                    # Everyone absent by default
-                    interaction_track_mask = torch.zeros(
-                        num_tracks, device=obs1.device).bool()
-                    # Only those visible in current scene are present
-                    interaction_track_mask[start:end] = track_mask[start:end]
-                    self.pool.track_mask = interaction_track_mask
+                ## Provide track_mask to the interaction encoders
+                ## Everyone absent by default. Only those visible in current scene are present
+                interaction_track_mask = torch.zeros(num_tracks, device=obs1.device).bool()
+                interaction_track_mask[start:end] = track_mask[start:end]
+                self.pool.track_mask = interaction_track_mask
 
-                pool_sample = self.pool(
-                    curr_hidden_state, prev_position, curr_position)
+                ## Pool
+                pool_sample = self.pool(curr_hidden_state, prev_position, curr_position)
                 batch_pool.append(pool_sample)
 
             pooled = torch.cat(batch_pool)
@@ -217,8 +215,8 @@ class LSTM(torch.nn.Module):
              for _ in range(num_tracks)],
         )
 
-        # LSTM-Based Interaction Encoders. Initialze Hdden state ## TODO
-        if self.pool.__class__.__name__ in {'NN_LSTM', 'TrajectronPooling', 'SAttention', 'SAttention_fast'}:
+        ## Reset LSTMs of Interaction Encoders.
+        if self.pool is not None:
             self.pool.reset(num_tracks, device=observed.device)
 
         # list of predictions
@@ -241,10 +239,10 @@ class LSTM(torch.nn.Module):
             # positions.append(obs2 + normal[:, :2])  # no sampling, just mean
             positions.append(obs2 + sampled_normal)  # no sampling, just mean
 
-        # initialize predictions with last position to form velocity
-        prediction_truth = list(itertools.chain.from_iterable(
+        # initialize predictions with last position to form velocity. DEEP COPY !!!
+        prediction_truth = copy.deepcopy(list(itertools.chain.from_iterable(
             (observed[-1:], prediction_truth)
-        ))
+        )))
 
         # decoder, predictions
         for obs1, obs2 in zip(prediction_truth[:-1], prediction_truth[1:]):
@@ -303,11 +301,8 @@ class LSTMPredictor(object):
         # self.model.train()
         with torch.no_grad():
             xy = trajnetplusplustools.Reader.paths_to_xy(paths)
+            # xy = augmentation.add_noise(xy, thresh=args.thresh, ped=args.ped_type)
             batch_split = [0, xy.shape[1]]
-
-            # Drop Distant (for real data)
-            # xy, mask = drop_distant(xy, r=15.0)
-            # scene_goal = scene_goal[mask]
 
             if args.normalize_scene:
                 xy, rotation, center, scene_goal = center_scene(

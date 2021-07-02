@@ -53,6 +53,11 @@ class TrajnetEvaluator:
         self.num_predictions = num_predictions
 
         self.pred_length = args.pred_length
+        self.obs_length = args.obs_length
+        self.enable_col1 = True
+
+        self.ade_list = {}
+        self.fde_list = {}
 
     def aggregate(self, name, disable_collision):
 
@@ -109,9 +114,11 @@ class TrajnetEvaluator:
 
             average_l2 = trajnetplusplustools.metrics.average_l2(ground_truth[0], primary_tracks, n_predictions=self.pred_length)
             final_l2 = trajnetplusplustools.metrics.final_l2(ground_truth[0], primary_tracks)
+            self.ade_list[self.scenes_id_gt[i]] = average_l2
+            self.fde_list[self.scenes_id_gt[i]] = final_l2
 
             if not disable_collision:
-
+                ground_truth = self.drop_post_obs(ground_truth, self.obs_length)
                 ## Collisions in GT
                 # person_radius=0.1
                 for j in range(1, len(ground_truth)):
@@ -123,10 +130,20 @@ class TrajnetEvaluator:
                             sub_score[sub_key][2] += 1
                         break
 
-
                 ## Collision in Predictions
-                flat_neigh_list = [item for sublist in neighbours_tracks for item in sublist]
-                if len(flat_neigh_list):
+                # [Col-I] only if neighs in gt = neighs in prediction
+                num_gt_neigh = len(ground_truth) - 1
+                num_predicted_neigh = len(neighbours_tracks)
+                if num_gt_neigh != num_predicted_neigh:
+                    self.enable_col1 = False
+                    for key in score:
+                        score[key][4] = 0
+                        score[key][3] = 0
+                    for sub_key in sub_score:
+                        sub_score[sub_key][4] = 0
+                        sub_score[sub_key][3] = 0
+
+                if self.enable_col1:
                     for key in keys:
                         score[key][4] += 1
                         for j in range(len(neighbours_tracks)):
@@ -252,6 +269,17 @@ class TrajnetEvaluator:
                self.lf, self.ca, self.grp, self.others, \
                self.topk_ade, self.topk_fde, self.overall_nll
 
+    def save_distance_lists(self, input_file):
+        distance_file = os.path.dirname(input_file).replace('test_pred', 'ade_fde_list')
+        os.makedirs(distance_file)
+        with open(distance_file + '/ade_fde.pkl', 'wb') as handle:
+            pickle.dump([self.ade_list, self.fde_list], handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    ## drop pedestrians that appear post observation
+    def drop_post_obs(self, ground_truth, obs_length):
+        obs_end_frame = ground_truth[0][obs_length].frame
+        ground_truth = [track for track in ground_truth if track[0].frame < obs_end_frame]
+        return ground_truth
 
 def collision_test(list_sub, name, args):
     """ Simple Collision Test """
@@ -299,6 +327,9 @@ def eval(gt, input_file, args):
     evaluator = TrajnetEvaluator(reader_gt, scenes_gt, scenes_id_gt, scenes_sub, indexes, sub_indexes, args)
     evaluator.aggregate('kf', args.disable_collision)
 
+    ## Save Lists
+    # evaluator.save_distance_lists(input_file)
+
     return evaluator.result()
 
 def main():
@@ -306,13 +337,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--path', default='trajdata',
                         help='directory of data to test')
-    parser.add_argument('--output', required=True, nargs='+',
+    parser.add_argument('--output', nargs='+',
                         help='relative path to saved model')
     parser.add_argument('--obs_length', default=9, type=int,
                         help='observation length')
     parser.add_argument('--pred_length', default=12, type=int,
                         help='prediction length')
-    parser.add_argument('--disable-write', action='store_true',
+    parser.add_argument('--write_only', action='store_true',
                         help='disable writing new files')
     parser.add_argument('--disable-collision', action='store_true',
                         help='disable collision metrics')
@@ -324,6 +355,8 @@ def main():
                         help='consider orca in evaluation')
     parser.add_argument('--kf', action='store_true',
                         help='consider kalman in evaluation')
+    parser.add_argument('--cv', action='store_true',
+                        help='consider constant velocity in evaluation')
     parser.add_argument('--normalize_scene', action='store_true',
                         help='augment scenes')
     parser.add_argument('--modes', default=1, type=int,
@@ -332,6 +365,11 @@ def main():
 
     scipy.seterr('ignore')
 
+    args.output = args.output if args.output is not None else []
+    ## assert length of output models is not None
+    if (not args.sf) and (not args.orca) and (not args.kf) and (not args.cv):
+        assert len(args.output), 'No output file is provided'
+
     ## Path to the data folder name to predict
     args.path = 'DATA_BLOCK/' + args.path + '/'
 
@@ -339,9 +377,11 @@ def main():
     args.path = args.path + 'test_pred/'
 
     ## Writes to Test_pred
-    ### Does this overwrite existing predictions? No. ###
-    if not args.disable_write:
-        write.main(args)
+    ## Does NOT overwrite existing predictions if they already exist ###
+    write.main(args)
+    if args.write_only: # For submission to AICrowd.
+        print("Predictions written in test_pred folder")
+        exit()
 
     ## Evaluates test_pred with test_private
     names = []

@@ -31,6 +31,7 @@ setup(
         'joblib',
         'pandas',
         'matplotlib',
+        'tqdm',
     ],
     extras_require={
         'test': [
